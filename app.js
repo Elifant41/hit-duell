@@ -14,9 +14,12 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
 
-let settings = Object.assign({ players: ['', '', ''], rounds: 10, timer: 60, jf: true, adult: false }, store.get('hd-settings', {}));
+let settings = Object.assign({ players: ['', '', ''], rounds: 10, timer: 60, jf: true, adult: false, myName: '' }, store.get('hd-settings', {}));
 let custom = store.get('hd-custom', []); // [{id, t, a}]
-let G = store.get('hd-game', null);
+// Online-Sitzung: {code, host}. Ist sie gesetzt, ist G das Online-Spiel (Host: gespeichert unter hd-ogame,
+// Mitspieler: kommt nur vom Server). Das Ein-Gerät-Spiel bleibt unberührt unter hd-game liegen.
+let NET = store.get('hd-net', null);
+let G = NET ? (NET.host ? store.get('hd-ogame', null) : null) : store.get('hd-game', null);
 let view = 'home';
 let sel = null;      // aktuelle (geheime) Auswahl beim Punktevergeben – wird nicht gespeichert
 let raf = 0;
@@ -25,7 +28,13 @@ let backTo = 'home'; // wohin „←“ in „Eigene Kategorien“ führt
 
 const saveSettings = () => store.set('hd-settings', settings);
 const saveCustom = () => store.set('hd-custom', custom);
-const saveGame = () => (G ? store.set('hd-game', G) : store.del('hd-game'));
+function saveGame() {
+  if (NET && !NET.host) return; // Mitspieler bekommen den Spielstand vom Host
+  const k = NET ? 'hd-ogame' : 'hd-game';
+  G ? store.set(k, G) : store.del(k);
+  if (NET) pushState();
+}
+const isHost = () => !NET || NET.host;
 
 /* ---------- Kategorien ---------- */
 function poolKeys(jf, adult) {
@@ -99,16 +108,47 @@ function boardHTML(order, opts = {}) {
     </div>`;
   }).join('')}</div>`;
 }
+// Steuer-Buttons sieht online nur der Spielleiter, die anderen sehen einen Warte-Hinweis.
+function hostOnly(html, wait) {
+  if (isHost()) return html;
+  return `<p class="wait">⏳ ${wait || `Warte auf ${esc(hostName())} …`}</p>`;
+}
 const byScore = () => G.players.map((_, i) => i).sort((a, b) => G.players[b].score - G.players[a].score || a - b);
+
+function gameOptions() {
+  return `<div class="panel">
+      <h3>Runden</h3>
+      <div class="seg">${ROUNDS.map((r) => `<button class="${settings.rounds === r ? 'on' : ''}" data-act="set" data-k="rounds" data-v="${r}">${r}</button>`).join('')}</div>
+      <h3>Zeit zum Suchen</h3>
+      <div class="seg">${TIMERS.map(([s, l]) => `<button class="${settings.timer === s ? 'on' : ''}" data-act="set" data-k="timer" data-v="${s}">${l}</button>`).join('')}</div>
+    </div>
+    <div class="panel">
+      <h3>Kategorien</h3>
+      <div class="toggles">
+        <button class="tgl${settings.jf ? ' on' : ''}" data-act="tgl" data-k="jf"><span class="box">${settings.jf ? '✓' : ''}</span><span><b>Jugendfrei</b><span class="small">${countJF()} Kategorien</span></span></button>
+        <button class="tgl${settings.adult ? ' on' : ''}" data-act="tgl" data-k="adult"><span class="box">${settings.adult ? '✓' : ''}</span><span><b>Nicht jugendfrei</b><span class="small">${countAdult()} Kategorien · 18+</span></span></button>
+      </div>
+      <button class="btn ghost" data-act="go" data-v="custom">✏️ Eigene Kategorien (${custom.length})</button>
+    </div>`;
+}
 
 /* ---------- Ansichten außerhalb des Spiels ---------- */
 const VIEWS = {
   home() {
+    if (NET) {
+      return `<div class="logo"><div class="mark">🎧</div><h1>Hit-Duell</h1><p>Wer spielt den besten Song?</p></div>
+      <div class="bottom">
+        <button class="btn primary big block" data-act="toOnline">▶ Zurück zum Online-Spiel <span class="small">(${esc(NET.code)})</span></button>
+        <button class="btn ghost block" data-act="leaveAsk">${NET.host ? '🛑 Online-Spiel beenden' : '🚪 Online-Spiel verlassen'}</button>
+        <button class="btn ghost block" data-act="go" data-v="rules">📖 Regeln</button>
+      </div>`;
+    }
     const resume = G && G.phase !== 'end';
     return `<div class="logo"><div class="mark">🎧</div><h1>Hit-Duell</h1><p>Wer spielt den besten Song?</p></div>
     <div class="bottom">
       ${resume ? `<button class="btn primary big block" data-act="resume">▶ Weiterspielen <span class="small">(${G.final ? 'Finale' : 'Runde ' + G.round + '/' + G.rounds})</span></button>` : ''}
-      <button class="btn ${resume ? '' : 'primary'} big block" data-act="go" data-v="setup">Neues Spiel</button>
+      <button class="btn ${resume ? '' : 'primary'} big block" data-act="go" data-v="setup">📱 Neues Spiel <span class="small">(ein Gerät)</span></button>
+      <button class="btn big block" data-act="go" data-v="online">🌐 Online-Spiel <span class="small">(jeder am eigenen Handy)</span></button>
       <div class="row"><button class="btn" data-act="go" data-v="custom">✏️ Eigene</button><button class="btn" data-act="go" data-v="rules">📖 Regeln</button></div>
       ${isIOS && !standalone ? '<div class="hint">Tipp: In Safari auf <b>Teilen</b> ⬆︎ → <b>Zum Home-Bildschirm</b> – dann läuft Hit-Duell wie eine App im Vollbild, auch offline.</div>' : ''}
       <p class="center muted small">${countJF() + countAdult()} Kategorien · ${custom.length} eigene</p>
@@ -127,22 +167,55 @@ const VIEWS = {
       </div>`).join('')}</div>
       ${ps.length < MAX_P ? '<button class="btn ghost" data-act="addPlayer">＋ Spieler</button>' : ''}
     </div>
-    <div class="panel">
-      <h3>Runden</h3>
-      <div class="seg">${ROUNDS.map((r) => `<button class="${settings.rounds === r ? 'on' : ''}" data-act="set" data-k="rounds" data-v="${r}">${r}</button>`).join('')}</div>
-      <h3>Zeit zum Suchen</h3>
-      <div class="seg">${TIMERS.map(([s, l]) => `<button class="${settings.timer === s ? 'on' : ''}" data-act="set" data-k="timer" data-v="${s}">${l}</button>`).join('')}</div>
-    </div>
-    <div class="panel">
-      <h3>Kategorien</h3>
-      <div class="toggles">
-        <button class="tgl${settings.jf ? ' on' : ''}" data-act="tgl" data-k="jf"><span class="box">${settings.jf ? '✓' : ''}</span><span><b>Jugendfrei</b><span class="small">${countJF()} Kategorien</span></span></button>
-        <button class="tgl${settings.adult ? ' on' : ''}" data-act="tgl" data-k="adult"><span class="box">${settings.adult ? '✓' : ''}</span><span><b>Nicht jugendfrei</b><span class="small">${countAdult()} Kategorien · 18+</span></span></button>
-      </div>
-      <button class="btn ghost" data-act="go" data-v="custom">✏️ Eigene Kategorien (${custom.length})</button>
-    </div>
+    ${gameOptions()}
     <p class="warn center" id="setupWarn"></p>
     <button class="btn primary big block" id="startBtn" data-act="start">Los geht's 🎶</button>`;
+  },
+
+  online() {
+    const ok = !!window.FIREBASE_CONFIG;
+    return `<div class="top"><button class="btn icon ghost" data-act="go" data-v="home" aria-label="Zurück">←</button><div class="title">Online-Spiel</div></div>
+    ${ok ? '' : '<p class="hint">Der Online-Modus ist noch nicht eingerichtet (Firebase-Zugangsdaten fehlen in <b>firebase-config.js</b>).</p>'}
+    <div class="panel">
+      <h3>Dein Name</h3>
+      <input class="field" id="myName" value="${esc(settings.myName)}" placeholder="Name" maxlength="18" autocomplete="off" autocapitalize="words">
+    </div>
+    <div class="panel">
+      <h3>Einem Spiel beitreten</h3>
+      <div class="row">
+        <input class="field code-in" id="joinCode" value="${esc(joinPrefill)}" placeholder="CODE" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <button class="btn primary" data-act="join" ${ok ? '' : 'disabled'}>Beitreten</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Oder selbst ein Spiel eröffnen</h3>
+      <p class="muted small">Du bist dann Spielleiter: Du stellst Runden und Kategorien ein, startest den Timer und führst durchs Spiel. Mitspielen und Punkte vergeben tust du trotzdem.</p>
+      <button class="btn" data-act="create" ${ok ? '' : 'disabled'}>🌐 Spiel eröffnen</button>
+    </div>
+    <p class="warn center" id="onlineWarn"></p>`;
+  },
+
+  lobby() {
+    const ps = lobbyPlayers();
+    const link = roomLink();
+    const head = `<div class="top"><button class="btn icon ghost" data-act="go" data-v="home" aria-label="Zurück">←</button><div class="title">Online-Spiel</div></div>`;
+    if (!fb) return `${head}<p class="wait">⏳ Verbinde …</p>`;
+    return `${head}
+    <div class="panel center">
+      <h3>Raum-Code</h3>
+      <div class="room-code">${esc(NET.code)}</div>
+      <p class="muted small">Mitspieler öffnen Hit-Duell → 🌐 Online-Spiel und geben den Code ein – oder du schickst ihnen den Link.</p>
+      <button class="btn ghost" data-act="shareLink">🔗 Link teilen</button>
+      <p class="muted small link">${esc(link)}</p>
+    </div>
+    <div class="panel">
+      <h3>Spieler (${ps.length}/${MAX_P})</h3>
+      <div class="order">${ps.map((p) => `<span class="chip${p.uid === fb.uid ? ' first' : ''}">${p.uid === lobbyHost ? '👑 ' : ''}${esc(p.name)}</span>`).join('')}</div>
+    </div>
+    ${NET.host ? `${gameOptions()}
+      <p class="warn center">${lobbyProblem()}</p>
+      <button class="btn primary big block" data-act="startOnline" ${lobbyProblem() ? 'disabled' : ''}>Los geht's 🎶</button>`
+    : `<p class="wait">⏳ Warte, bis ${esc(hostName())} das Spiel startet …</p>`}`;
   },
 
   custom() {
@@ -157,14 +230,13 @@ const VIEWS = {
     <div class="clist">${list.map((c) => `<div class="citem"><p>${esc(c.t)}${c.a ? '<span class="badge18">18+</span>' : ''}</p><button class="btn icon ghost" data-act="delCat" data-id="${c.id}" aria-label="Löschen">🗑</button></div>`).join('')}</div>`
     : '<p class="muted center">Noch keine eigenen Kategorien. Sie werden im Spiel zufällig zwischen die anderen gemischt (mit ★ markiert).</p>'}`;
   },
-
   rules() {
     return `<div class="top"><button class="btn icon ghost" data-act="go" data-v="home" aria-label="Zurück">←</button><div class="title">Spielregeln</div></div>
     <div class="panel rules"><ol>
       <li>Jede Runde zieht die App eine <b>Kategorie</b>. Gefällt sie euch nicht: <b>↻ Andere Kategorie</b>.</li>
       <li>Timer starten – alle suchen <b>heimlich</b> auf ihrem Handy einen passenden Song.</li>
       <li>Zeit um: Reihum spielt jeder seinen Song vor (die App sagt, wer anfängt).</li>
-      <li>Das Gerät wird herumgegeben. Jeder vergibt <b>geheim 2 Punkte und 1 Punkt</b> an zwei andere Spieler – nie an sich selbst. Bei 3–4 Spielern reicht auch ein Punkt.</li>
+      <li>Das Gerät wird herumgegeben (online: jeder am eigenen Handy). Jeder vergibt <b>geheim 2 Punkte und 1 Punkt</b> an zwei andere Spieler – nie an sich selbst. Bei 3–4 Spielern reicht auch ein Punkt.</li>
       <li>Danach zeigt die App die Punkte der Runde und den Gesamtstand.</li>
       <li>Nach 10, 15 oder 20 Runden gewinnt, wer die meisten Punkte hat.</li>
       <li><b>Gleichstand?</b> Finale: neue Kategorie, nur die Punktgleichen suchen einen Song. Alle anderen sind die Jury und haben je eine Stimme.</li>
@@ -183,8 +255,8 @@ const PHASES = {
     ${catCard()}
     ${who}
     <div class="bottom">
-      <button class="btn primary big block" data-act="startTimer">⏱ Timer starten</button>
-      <button class="btn ghost block" data-act="skip">↻ Andere Kategorie</button>
+      ${hostOnly(`<button class="btn primary big block" data-act="startTimer">⏱ Timer starten</button>
+      <button class="btn ghost block" data-act="skip">↻ Andere Kategorie</button>`, `Gleich geht's los – ${esc(hostName())} startet den Timer.`)}
     </div>`;
   },
 
@@ -199,10 +271,10 @@ const PHASES = {
       </svg>
       <div class="time" id="time" role="timer"></div>
     </div>
-    <div class="bottom row">
+    ${isHost() ? `<div class="bottom row">
       <button class="btn" data-act="pause">${G.left != null ? '▶ Weiter' : '⏸ Pause'}</button>
       <button class="btn" data-act="timeUp">Alle fertig ✓</button>
-    </div>`;
+    </div>` : G.left != null ? '<p class="wait">⏸ Pausiert</p>' : ''}`;
   },
 
   play() {
@@ -217,7 +289,8 @@ const PHASES = {
       <div class="order">${order.map((i, n) => `<span class="chip${n === 0 ? ' first' : ''}">${n + 1}. ${pName(i)}</span>`).join('')}</div>
     </div>
     ${catCard(true)}
-    <div class="bottom"><button class="btn primary big block" data-act="toVote">${G.final ? 'Zur Jury-Abstimmung →' : 'Zur Punktevergabe →'}</button></div>`;
+    <div class="bottom">${hostOnly(`<button class="btn primary big block" data-act="toVote">${G.final ? 'Zur Jury-Abstimmung →' : 'Zur Punktevergabe →'}</button>`,
+      `Nach dem Vorspielen startet ${esc(hostName())} die ${G.final ? 'Jury-Abstimmung' : 'Punktevergabe'}.`)}</div>`;
   },
 
   pass() {
@@ -234,7 +307,7 @@ const PHASES = {
   },
 
   vote() {
-    const v = G.voters[G.vi];
+    const v = NET ? myIdx() : G.voters[G.vi];
     if (G.final) {
       const opts = G.final.ids.filter((i) => i !== v);
       return `${topBar()}
@@ -265,6 +338,27 @@ const PHASES = {
     <div class="bottom"><button class="btn primary big block" data-act="confirmVote" ${ok ? '' : 'disabled'}>Punkte abgeben ✓</button></div>`;
   },
 
+  // Online-Abstimmung: jeder stimmt am eigenen Gerät ab, der Host sammelt die Stimmen ein.
+  ovote() {
+    const me = myIdx();
+    const mine = me >= 0 && G.voters.includes(me) && !G.done.includes(me) && sentVote !== G.voteId;
+    if (mine) {
+      if (!sel || sel.id !== G.voteId) sel = { 1: null, 2: null, pick: null, id: G.voteId };
+      return PHASES.vote();
+    }
+    const missing = G.voters.filter((i) => !G.done.includes(i));
+    const dots = G.voters.map((i) => `<i class="${G.done.includes(i) ? 'done' : ''}"></i>`).join('');
+    const amVoter = me >= 0 && G.voters.includes(me);
+    return `${topBar()}
+    <div class="pass">
+      <div class="emoji">${amVoter ? '✅' : '🗳'}</div>
+      <h2>${amVoter ? 'Danke, deine Stimme ist abgegeben!' : G.final ? 'Die Jury stimmt ab …' : 'Abstimmung läuft …'}</h2>
+      <div class="dots">${dots}</div>
+      <p class="muted">${G.done.length} von ${G.voters.length} haben abgestimmt.${missing.length ? '<br>Es fehlen noch: ' + joinNames(missing) : ''}</p>
+      ${NET.host && G.done.length && missing.length ? '<button class="btn ghost" data-act="endVoteAsk">Abstimmung beenden</button>' : ''}
+    </div>`;
+  },
+
   reveal() {
     const pts = G.roundPts;
     const max = Math.max(...pts);
@@ -275,9 +369,9 @@ const PHASES = {
     ${catCard(true)}
     <p class="winner-line">${line}</p>
     ${boardHTML(byScore(), { pts, hot, prev: G.prevRank })}
-    <div class="bottom">${G.round < G.rounds
+    <div class="bottom">${hostOnly(G.round < G.rounds
       ? `<button class="btn primary big block" data-act="nextRound">Runde ${G.round + 1} →</button>`
-      : '<button class="btn yellow big block" data-act="finish">🏁 Zum Endstand</button>'}</div>`;
+      : '<button class="btn yellow big block" data-act="finish">🏁 Zum Endstand</button>')}</div>`;
   },
 
   finalIntro() {
@@ -294,7 +388,7 @@ const PHASES = {
       <p class="muted">Ein Finale entscheidet: neue Kategorie, nur die Finalisten suchen einen Song.</p>
       ${jury}
     </div>
-    <div class="bottom"><button class="btn yellow big block" data-act="startFinal">Finale starten ⚔️</button></div>`;
+    <div class="bottom">${hostOnly('<button class="btn yellow big block" data-act="startFinal">Finale starten ⚔️</button>')}</div>`;
   },
 
   finalResult() {
@@ -308,15 +402,13 @@ const PHASES = {
       return `${topBar()}
       <div class="big-msg"><div class="emoji">👑</div><h1>${pName(top[0])} gewinnt das Finale!</h1></div>
       <div class="board">${rows}</div>
-      <div class="bottom"><button class="btn yellow big block" data-act="champion" data-p="${top[0]}">🏁 Zum Endstand</button></div>`;
+      <div class="bottom">${hostOnly(`<button class="btn yellow big block" data-act="champion" data-p="${top[0]}">🏁 Zum Endstand</button>`)}</div>`;
     }
     return `${topBar()}
     <div class="big-msg"><div class="emoji">😱</div><h1>Wieder Gleichstand!</h1><p>${joinNames(top)} haben gleich viele Stimmen.</p></div>
     <div class="board">${rows}</div>
-    <div class="bottom">
-      <button class="btn yellow big block" data-act="againFinal">⚔️ Noch ein Finale</button>
-      <button class="btn ghost block" data-act="shareWin">🤝 Geteilter Sieg</button>
-    </div>`;
+    <div class="bottom">${hostOnly(`<button class="btn yellow big block" data-act="againFinal">⚔️ Noch ein Finale</button>
+      <button class="btn ghost block" data-act="shareWin">🤝 Geteilter Sieg</button>`, `${esc(hostName())} entscheidet: noch ein Finale oder geteilter Sieg.`)}</div>`;
   },
 
   end() {
@@ -341,8 +433,8 @@ const PHASES = {
     <div class="podium">${podOrder.map((i) => `<div class="pod ${cls(i)}"><span class="nm">${pName(i)}</span><div class="blk">${rk[i]}<small>${G.players[i].score} P.</small></div></div>`).join('')}</div>
     ${order.length > 3 ? `<div class="board">${order.slice(3).map((i) => `<div class="brow"><span class="rank">${rk[i]}.</span><span class="name">${pName(i)}</span><span class="score">${G.players[i].score}</span></div>`).join('')}</div>` : ''}
     <div class="bottom">
-      <button class="btn primary big block" data-act="again">🔁 Nochmal spielen</button>
-      <button class="btn ghost block" data-act="home">Startseite</button>
+      ${hostOnly('<button class="btn primary big block" data-act="again">🔁 Nochmal spielen</button>', `Nochmal? ${esc(hostName())} kann eine neue Runde starten.`)}
+      <button class="btn ghost block" data-act="${NET ? 'leaveAsk' : 'home'}">${NET ? (NET.host ? 'Spiel beenden' : 'Spiel verlassen') : 'Startseite'}</button>
     </div>
     <h3>Rückblick</h3>
     <div class="recap">${recap}</div>`;
@@ -366,7 +458,8 @@ function render() {
 /* ---------- Timer ---------- */
 const CIRC = 552.92;
 let lastBeep = -1;
-function timeLeft() { return G.left != null ? G.left : Math.max(0, (G.endAt - Date.now()) / 1000); }
+const now = () => Date.now() + (fb ? fb.offset : 0);
+function timeLeft() { return G.left != null ? G.left : Math.max(0, (G.endAt - now()) / 1000); }
 function tick() {
   const left = timeLeft();
   const fg = $('#ringFg'), tm = $('#time'), ring = $('#ring');
@@ -471,10 +564,11 @@ function validateSetup() {
 }
 
 /* ---------- Spielablauf ---------- */
-function newGame() {
+function newGame(players) {
   const names = settings.players.map((n) => n.trim()).filter(Boolean);
   G = {
-    players: names.map((name) => ({ name, score: 0 })),
+    players: players || names.map((name) => ({ name, score: 0 })),
+    gid: Math.random().toString(36).slice(2, 8),
     rounds: settings.rounds, timer: settings.timer, jf: settings.jf, adult: settings.adult,
     round: 1, used: [], log: [], phase: 'cat', cat: null,
     voters: [], vi: 0, roundPts: [], prevRank: null,
@@ -485,6 +579,25 @@ function newGame() {
   view = 'game';
   render();
 }
+// Gibt die Stimme von Spieler v (s = {1, 2} bzw. {pick}) in G ein. Ungültige Stimmen werden ignoriert.
+function addVote(v, s) {
+  const valid = (p) => Number.isInteger(p) && p >= 0 && p < G.players.length && p !== v;
+  if (G.final) {
+    if (valid(s.pick) && G.final.ids.includes(s.pick)) G.final.votes[s.pick]++;
+    return;
+  }
+  if (valid(s[2])) G.roundPts[s[2]] += 2;
+  if (valid(s[1]) && s[1] !== s[2]) G.roundPts[s[1]] += 1;
+}
+function endVoting() {
+  if (G.final) { G.phase = 'finalResult'; return; }
+  G.prevRank = ranksOf(G.players.map((p) => p.score));
+  G.players.forEach((p, i) => { p.score += G.roundPts[i]; });
+  G.log.push({ cat: G.cat.t, pts: G.roundPts.slice() });
+  G.phase = 'reveal';
+}
+const voteOk = (s) => (G.final ? s.pick != null : needBoth() ? s[2] != null && s[1] != null : s[2] != null || s[1] != null);
+
 function startFinal(ids) {
   let judges = G.players.map((_, i) => i).filter((i) => !ids.includes(i));
   const allJudge = judges.length === 0;
@@ -494,10 +607,10 @@ function startFinal(ids) {
 }
 
 const ACT = {
-  go(d) { if (d.v === 'custom') backTo = view === 'setup' ? 'setup' : 'home'; view = d.v; render(); },
+  go(d) { if (d.v === 'custom') backTo = ['setup', 'lobby'].includes(view) ? view : 'home'; view = d.v; render(); },
   back() { view = backTo; render(); },
   home() { if (G && G.phase === 'end') { G = null; saveGame(); } view = 'home'; render(); },
-  resume() { if (G.phase === 'vote') G.phase = 'pass'; view = 'game'; render(); },
+  resume() { if (!NET && G.phase === 'vote') G.phase = 'pass'; view = 'game'; render(); },
 
   addPlayer() {
     if (settings.players.length >= MAX_P) return;
@@ -535,6 +648,12 @@ const ACT = {
   },
 
   menu() {
+    if (NET) {
+      return dialog(`<div class="stack"><h2>Menü</h2><p class="muted small">Online-Spiel · Code <b>${esc(NET.code)}</b></p>
+        <button class="btn" data-act="pauseHome">Zur Startseite <span class="small muted">(du bleibst im Spiel)</span></button>
+        <button class="btn ghost" data-act="leaveAsk">${NET.host ? '🛑 Spiel für alle beenden' : '🚪 Spiel verlassen'}</button>
+        <button class="btn ghost" data-act="closeDlg">Zurück zum Spiel</button></div>`);
+    }
     dialog(`<div class="stack"><h2>Menü</h2>
       <button class="btn" data-act="pauseHome">⏸ Zur Startseite <span class="small muted">(Spiel bleibt gespeichert)</span></button>
       <button class="btn ghost" data-act="quitAsk">🛑 Spiel beenden</button>
@@ -542,6 +661,7 @@ const ACT = {
   },
   pauseHome() {
     closeDlg();
+    if (NET) { view = 'home'; return render(); }
     if (G.phase === 'timer' && G.left == null) G.left = timeLeft();
     if (G.phase === 'vote') G.phase = 'pass';
     saveGame(); view = 'home'; render();
@@ -557,9 +677,9 @@ const ACT = {
   },
 
   skip() { drawCat(); saveGame(); render(); },
-  startTimer() { G.phase = 'timer'; G.endAt = Date.now() + G.timer * 1000; G.left = null; lastBeep = -1; saveGame(); render(); },
+  startTimer() { G.phase = 'timer'; G.endAt = now() + G.timer * 1000; G.left = null; lastBeep = -1; saveGame(); render(); },
   pause() {
-    if (G.left != null) { G.endAt = Date.now() + G.left * 1000; G.left = null; }
+    if (G.left != null) { G.endAt = now() + G.left * 1000; G.left = null; }
     else { G.left = timeLeft(); }
     saveGame(); render();
   },
@@ -572,6 +692,7 @@ const ACT = {
     G.vi = 0;
     if (!G.final) G.roundPts = G.players.map(() => 0);
     G.phase = 'pass';
+    if (NET) { G.phase = 'ovote'; G.done = []; G.voteId = `${G.gid}-${G.round}-${G.final ? 'f' + G.final.n : 'r'}`; }
     saveGame(); render();
   },
   iam() { sel = { 1: null, 2: null, pick: null }; G.phase = 'vote'; render(); },
@@ -583,28 +704,20 @@ const ACT = {
   },
   pick(d) { sel.pick = +d.p; render(); },
   confirmVote() {
-    if (!sel) return;
-    if (G.final) {
-      if (sel.pick == null) return;
-      G.final.votes[sel.pick]++;
-    } else {
-      const ok = needBoth() ? sel[2] != null && sel[1] != null : sel[2] != null || sel[1] != null;
-      if (!ok) return;
-      if (sel[2] != null) G.roundPts[sel[2]] += 2;
-      if (sel[1] != null) G.roundPts[sel[1]] += 1;
-    }
+    if (!sel || !voteOk(sel)) return;
+    if (NET) return sendVote();
+    addVote(G.voters[G.vi], sel);
     sel = null;
     G.vi++;
     if (G.vi < G.voters.length) G.phase = 'pass';
-    else if (G.final) G.phase = 'finalResult';
-    else {
-      G.prevRank = ranksOf(G.players.map((p) => p.score));
-      G.players.forEach((p, i) => { p.score += G.roundPts[i]; });
-      G.log.push({ cat: G.cat.t, pts: G.roundPts.slice() });
-      G.phase = 'reveal';
-    }
+    else endVoting();
     saveGame(); render();
   },
+  endVoteAsk() {
+    dialog(`<div class="stack"><h2>Abstimmung beenden?</h2><p class="muted">Wer noch nicht abgestimmt hat, verfällt für diese Runde.</p>
+      <button class="btn primary" data-act="endVote">Ja, auswerten</button><button class="btn ghost" data-act="closeDlg">Abbrechen</button></div>`);
+  },
+  endVote() { closeDlg(); tallyVotes(true); },
   nextRound() { G.round++; G.prevRank = null; drawCat(); G.phase = 'cat'; saveGame(); render(); },
   finish() {
     const sc = G.players.map((p) => p.score);
@@ -629,10 +742,254 @@ const ACT = {
     G.champion = null; G.phase = 'end'; saveGame(); render();
   },
   again() {
+    if (NET) { G = null; saveGame(); view = 'lobby'; return render(); }
     settings.players = G.players.map((p) => p.name); saveSettings();
     G = null; saveGame(); view = 'setup'; render();
   },
 };
+
+/* ---------- Online-Modus (Firebase Realtime Database) ----------
+   Der Host hält den Spielstand G und schreibt ihn als JSON nach rooms/<code>/state.
+   Mitspieler lesen nur mit. Stimmen landen unter votes/<code>/<abstimmung>/<uid> –
+   lesen darf sie nur der Host (siehe database.rules.json), er zählt sie aus. */
+const FB_VER = '10.12.2';
+let fb = null, fbLoading = null;
+let lobby = null;      // {uid: {name, t}}
+let lobbyHost = null;  // uid des Spielleiters
+let joinPrefill = '';
+let sentVote = null;   // voteId, für die dieses Gerät schon abgestimmt hat
+let unsubs = [];
+let voteSub = null, voteSubId = null, voteData = {};
+
+function loadFirebase() {
+  if (fb) return Promise.resolve(fb);
+  if (!window.FIREBASE_CONFIG) return Promise.reject(new Error('Online-Modus ist nicht eingerichtet.'));
+  if (!fbLoading) {
+    fbLoading = (async () => {
+      const base = `https://www.gstatic.com/firebasejs/${FB_VER}/`;
+      const [appM, authM, dbM] = await Promise.all(['app', 'auth', 'database'].map((m) => import(`${base}firebase-${m}.js`)));
+      const app = appM.initializeApp(window.FIREBASE_CONFIG);
+      const auth = authM.getAuth(app);
+      // Erst abwarten, ob schon eine (anonyme) Anmeldung gespeichert ist – sonst gäbe es bei jedem Laden eine neue Kennung.
+      let user = await new Promise((res) => { const un = authM.onAuthStateChanged(auth, (u) => { un(); res(u); }); });
+      if (!user) user = (await authM.signInAnonymously(auth)).user;
+      const o = Object.assign({}, dbM, { db: dbM.getDatabase(app), uid: user.uid, offset: 0 });
+      o.r = (path) => o.ref(o.db, path);
+      o.onValue(o.r('.info/serverTimeOffset'), (snap) => { o.offset = snap.val() || 0; });
+      fb = o;
+      return o;
+    })().catch((e) => { fbLoading = null; throw e; });
+  }
+  return fbLoading;
+}
+
+function netFail(e) {
+  console.error(e);
+  const msg = (e && (e.code || e.message)) || String(e);
+  const w = $('#onlineWarn');
+  if (w) w.textContent = msg.includes('PERMISSION_DENIED') ? 'Zugriff verweigert.' : 'Verbindungsproblem: ' + msg;
+  else toast('Verbindungsproblem – bitte Internet prüfen');
+}
+function setNet(n) { NET = n; n ? store.set('hd-net', n) : store.del('hd-net'); }
+function unsubscribeAll() {
+  unsubs.forEach((u) => u()); unsubs = [];
+  if (voteSub) voteSub(); voteSub = null; voteSubId = null; voteData = {};
+}
+
+async function connectRoom() {
+  await loadFirebase();
+  unsubscribeAll();
+  const base = `rooms/${NET.code}`;
+  unsubs.push(fb.onValue(fb.r(base + '/host'), (snap) => {
+    lobbyHost = snap.val();
+    if (!lobbyHost || (NET && NET.host && lobbyHost !== fb.uid)) return leaveLocal('Das Online-Spiel wurde beendet.');
+    if (view === 'lobby') render();
+  }, netFail));
+  unsubs.push(fb.onValue(fb.r(base + '/players'), (snap) => {
+    lobby = snap.val() || {};
+    if (view === 'lobby') render();
+  }, netFail));
+  if (NET.host) pushState();
+  else unsubs.push(fb.onValue(fb.r(base + '/state'), (snap) => onState(snap.val()), netFail));
+  render();
+}
+
+function onState(v) {
+  let g = null;
+  try { g = v ? JSON.parse(v) : null; } catch {}
+  G = g;
+  if (G && view === 'lobby') view = 'game';
+  if (!G && view === 'game') view = 'lobby';
+  if (view === 'game' || view === 'lobby') render();
+}
+
+function pushState() {
+  if (!fb || !NET || !NET.host) return;
+  fb.set(fb.r(`rooms/${NET.code}/state`), G ? JSON.stringify(G) : null).catch(netFail);
+  // Während einer Abstimmung die eingehenden Stimmen beobachten
+  const want = G && G.phase === 'ovote' ? G.voteId : null;
+  if (want === voteSubId) return;
+  if (voteSub) voteSub();
+  voteSub = null; voteSubId = want; voteData = {};
+  if (want) {
+    voteSub = fb.onValue(fb.r(`votes/${NET.code}/${want}`), (snap) => {
+      if (voteSubId !== want) return;
+      voteData = snap.val() || {};
+      tallyVotes(false);
+    }, netFail);
+  }
+}
+
+// Host: Stimmen auswerten. Sind alle da (oder force), geht es zum Ergebnis.
+function tallyVotes(force) {
+  if (!G || G.phase !== 'ovote') return;
+  const idx = {};
+  G.players.forEach((p, i) => { idx[p.uid] = i; });
+  const votes = [];
+  Object.entries(voteData).forEach(([uid, str]) => {
+    const i = idx[uid];
+    if (i == null || !G.voters.includes(i)) return;
+    try { const v = JSON.parse(str); if (voteOk(v)) votes.push([i, v]); } catch {}
+  });
+  const done = votes.map((x) => x[0]).sort((a, b) => a - b);
+  if (!force && done.length < G.voters.length) {
+    if (done.join() !== G.done.join()) { G.done = done; saveGame(); render(); }
+    return;
+  }
+  if (G.final) G.final.votes = G.players.map(() => 0);
+  else G.roundPts = G.players.map(() => 0);
+  votes.forEach(([i, v]) => addVote(i, v));
+  G.done = done;
+  endVoting();
+  saveGame(); render();
+}
+
+function sendVote() {
+  const id = G.voteId;
+  const v = JSON.stringify({ 1: sel[1], 2: sel[2], pick: sel.pick });
+  sentVote = id; sel = null; render();
+  fb.set(fb.r(`votes/${NET.code}/${id}/${fb.uid}`), v).catch((e) => { sentVote = null; netFail(e); render(); });
+}
+
+const myIdx = () => (fb && G ? G.players.findIndex((p) => p.uid === fb.uid) : -1);
+function hostName() {
+  const uid = (G && G.hostUid) || lobbyHost;
+  const p = (lobby && lobby[uid]) || (G && G.players.find((x) => x.uid === uid));
+  return p ? p.name : 'Spielleiter';
+}
+const lobbyPlayers = () => Object.entries(lobby || {}).map(([uid, p]) => ({ uid, name: String(p.name || '').trim(), t: p.t || 0 })).sort((a, b) => a.t - b.t);
+function lobbyProblem() {
+  const ps = lobbyPlayers();
+  if (ps.length < MIN_P) return `Mindestens ${MIN_P} Spieler – es fehl${MIN_P - ps.length === 1 ? 't noch einer' : 'en noch ' + (MIN_P - ps.length)}.`;
+  if (ps.length > MAX_P) return `Höchstens ${MAX_P} Spieler.`;
+  const low = ps.map((p) => p.name.toLowerCase());
+  const dup = low.find((n, i) => low.indexOf(n) !== i);
+  if (dup != null) return `Der Name „${esc(ps[low.indexOf(dup)].name)}“ kommt doppelt vor.`;
+  if (!settings.jf && !settings.adult) return 'Wähle mindestens eine Kategorie-Art.';
+  return '';
+}
+const roomLink = () => location.origin + location.pathname + '?r=' + (NET ? NET.code : '');
+const randomCode = () => Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random() * 24)]).join('');
+
+function leaveLocal(msg) {
+  unsubscribeAll();
+  if (NET && NET.host) store.del('hd-ogame');
+  setNet(null);
+  G = store.get('hd-game', null);
+  sel = null; sentVote = null; lobby = null; lobbyHost = null;
+  closeDlg();
+  view = 'home'; render();
+  if (msg) toast(msg);
+}
+
+function onlineName() {
+  const name = settings.myName.trim();
+  if (!name) { $('#onlineWarn').textContent = 'Bitte gib deinen Namen ein.'; $('#myName').focus(); }
+  return name;
+}
+
+Object.assign(ACT, {
+  toOnline() { view = G ? 'game' : 'lobby'; render(); },
+  async create(d, btn) {
+    const name = onlineName();
+    if (!name) return;
+    btn.disabled = true; $('#onlineWarn').textContent = 'Verbinde …';
+    try {
+      await loadFirebase();
+      let code = null, err = null;
+      for (let n = 0; n < 6 && !code; n++) {
+        const c = randomCode();
+        try {
+          await fb.set(fb.r('rooms/' + c), { host: fb.uid, created: fb.serverTimestamp(), players: { [fb.uid]: { name, t: fb.serverTimestamp() } } });
+          code = c;
+        } catch (e) { err = e; } // Code schon vergeben → nächsten probieren
+      }
+      if (!code) throw err;
+      store.del('hd-ogame');
+      setNet({ code, host: true });
+      G = null; view = 'lobby';
+      await connectRoom();
+    } catch (e) { btn.disabled = false; netFail(e); }
+  },
+  async join(d, btn) {
+    const name = onlineName();
+    if (!name) return;
+    const code = ($('#joinCode').value || '').trim().toUpperCase();
+    if (code.length !== 4) { $('#onlineWarn').textContent = 'Der Code hat 4 Buchstaben.'; return; }
+    btn.disabled = true; $('#onlineWarn').textContent = 'Verbinde …';
+    try {
+      await loadFirebase();
+      const snap = await fb.get(fb.r('rooms/' + code));
+      const room = snap.val();
+      if (!room || !room.host) throw Object.assign(new Error(''), { msg: 'Kein Spiel mit diesem Code gefunden.' });
+      const member = room.players && room.players[fb.uid];
+      if (!member && room.state) throw Object.assign(new Error(''), { msg: 'Das Spiel läuft schon – beitreten geht nur vor dem Start.' });
+      if (!member && Object.keys(room.players || {}).length >= MAX_P) throw Object.assign(new Error(''), { msg: 'Das Spiel ist schon voll.' });
+      if (member) await fb.set(fb.r(`rooms/${code}/players/${fb.uid}/name`), name);
+      else await fb.set(fb.r(`rooms/${code}/players/${fb.uid}`), { name, t: fb.serverTimestamp() });
+      const host = room.host === fb.uid;
+      setNet({ code, host });
+      joinPrefill = '';
+      G = host ? store.get('hd-ogame', null) : null;
+      view = G ? 'game' : 'lobby';
+      await connectRoom();
+    } catch (e) {
+      btn.disabled = false;
+      if (e.msg) $('#onlineWarn').textContent = e.msg; else netFail(e);
+    }
+  },
+  async shareLink() {
+    const url = roomLink();
+    try {
+      if (navigator.share) return await navigator.share({ title: 'Hit-Duell', text: `Spiel mit bei Hit-Duell! Code: ${NET.code}`, url });
+      await navigator.clipboard.writeText(url);
+      toast('Link kopiert');
+    } catch {}
+  },
+  startOnline() {
+    if (lobbyProblem()) return;
+    newGame(lobbyPlayers().map((p) => ({ name: p.name, uid: p.uid, score: 0 })));
+    G.hostUid = fb.uid; G.done = []; G.voteId = null;
+    saveGame();
+  },
+  leaveAsk() {
+    const host = NET.host;
+    dialog(`<div class="stack"><h2>${host ? 'Spiel für alle beenden?' : 'Spiel verlassen?'}</h2>
+      <p class="muted">${host ? 'Alle Mitspieler fliegen raus, der Spielstand geht verloren.' : 'Mit dem Code kannst du wieder einsteigen.'}</p>
+      <button class="btn primary" data-act="leave">${host ? 'Ja, beenden' : 'Ja, verlassen'}</button><button class="btn ghost" data-act="closeDlg">Abbrechen</button></div>`);
+  },
+  leave() {
+    const n = NET;
+    if (fb && n) {
+      if (n.host) { fb.remove(fb.r('votes/' + n.code)).catch(() => {}).then(() => fb.remove(fb.r('rooms/' + n.code))).catch(() => {}); }
+      else if (!G) fb.remove(fb.r(`rooms/${n.code}/players/${fb.uid}`)).catch(() => {});
+    }
+    leaveLocal();
+  },
+});
+
+const HOST_ONLY = new Set(['skip', 'startTimer', 'pause', 'timeUp', 'toVote', 'iam', 'nextRound', 'finish', 'startFinal',
+  'champion', 'againFinal', 'shareWin', 'again', 'endVoteAsk', 'endVote', 'startOnline']);
 
 /* ---------- Events ---------- */
 document.addEventListener('pointerdown', unlockAudio, { passive: true });
@@ -640,7 +997,8 @@ document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-act]');
   if (!b || b.disabled) return;
   const fn = ACT[b.dataset.act];
-  if (fn) fn(b.dataset, b);
+  if (!fn || (HOST_ONLY.has(b.dataset.act) && !isHost())) return;
+  fn(b.dataset, b);
 });
 document.addEventListener('input', (e) => {
   const t = e.target;
@@ -648,6 +1006,8 @@ document.addEventListener('input', (e) => {
     settings.players[+t.dataset.pi] = t.value;
     saveSettings(); validateSetup();
   }
+  if (t.id === 'myName') { settings.myName = t.value; saveSettings(); }
+  if (t.id === 'joinCode') { t.value = t.value.toUpperCase().replace(/[^A-Z]/g, ''); joinPrefill = t.value; }
 });
 document.addEventListener('keydown', (e) => {
   const t = e.target;
@@ -661,7 +1021,15 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* ---------- Start ---------- */
-if (G && G.phase !== 'end') {
+const urlRoom = new URLSearchParams(location.search).get('r');
+if (urlRoom) history.replaceState(null, '', location.pathname);
+if (NET) {
+  view = G ? 'game' : 'lobby';
+  connectRoom().catch(netFail);
+} else if (urlRoom) {
+  joinPrefill = urlRoom.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 4);
+  view = 'online';
+} else if (G && G.phase !== 'end') {
   if (G.phase === 'vote') G.phase = 'pass';
   view = 'game';
 }

@@ -1,6 +1,6 @@
 // Offline-Cache. Bei neuer Version CACHE hochzählen → App zeigt „Neue Version – Neu laden“.
-const CACHE = 'hit-duell-v1';
-const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'kategorien.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
+const CACHE = 'hit-duell-v2';
+const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'kategorien.js', 'firebase-config.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
